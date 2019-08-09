@@ -1,0 +1,203 @@
+afths_circ <- function (ct, X, nburnin = 1000, nmc = 5000, thin = 1, 
+                   Xtest = NULL, cttest = NULL)
+{
+  
+  niter   <- nburnin + nmc
+  effsamp <- (niter - nburnin)/thin
+  
+  n <- nrow(X)
+  p <- ncol(X)
+  
+  time         <- ct[, 1]
+  status       <- ct[, 2]
+  censored.id  <- which(status == 0)
+  n.censored   <- length(censored.id)  # number of censored observations
+  n.observed   <- n - n.censored
+  X.censored   <- X[censored.id, ]
+  X.observed   <- X[-censored.id, ]
+  y <- logtime <- log(time)   # for coding convenience, since the whole code is written with y
+  y.censored   <- y[censored.id]
+  y.observed   <- y[-censored.id]
+  
+  
+  alpha    <- 0
+  beta     <- rep(0, p)
+  lambda   <- rep(1, p/2)
+  tau      <- 1
+  sigma_sq <- 1
+  
+  
+  I_n         <- diag(n)
+  l0          <- rep(0, p)
+  l1          <- rep(1, n)
+  l2          <- rep(1, p)
+  Q_star      <- t(X) %*% X
+  
+  
+  if(is.null(Xtest))
+  {
+    Xtest <- X
+    ntest <- n
+    cttest<- ct
+  } else {
+    ntest <- nrow(Xtest)
+  }
+  
+  
+  
+  alphaout          <- rep(0, effsamp)
+  betaout           <- matrix(0, p, effsamp)
+  lambdaout         <- matrix(0, p/2, effsamp)
+  sigmaSqout        <- rep(0, effsamp)
+  predsurvout       <- matrix(0, ntest, effsamp)
+  logtimeout        <- matrix(0, ntest, effsamp)
+  likelihood.out    <- matrix(0, n, effsamp)
+  loglikelihood.out <- rep(0, effsamp)
+  
+  
+ 
+  
+  
+  
+  
+  for (i in 1:niter)
+  {
+    
+   
+    
+    
+    
+    ## Impute the Censored data ##
+    mean.impute <- alpha + X.censored %*% beta
+    sd.impute   <- sqrt(sigma_sq)
+    ## update censored data ##
+    y[censored.id] <- rtnorm(n.censored, mean = mean.impute, sd = sd.impute, lower = logtime[censored.id])  # response
+    
+    
+    
+    # Sample $ \alpha $
+    A           <- crossprod(x = rep(1, n)) + chol2inv(chol(100 * diag(1)))
+    Ainv        <- chol2inv(chol(A))
+    Sigma.alpha <- sigma_sq * Ainv
+    mean.alpha  <- as.vector(Ainv %*% t(rep(1, n)) %*% (y - X %*% beta))
+    alpha       <- as.vector(mvrnorm(n = 1, mu = mean.alpha, Sigma = Sigma.alpha))
+    
+    
+    
+    ## Update beta according to horseshoe
+      if (p > n)
+      {
+        lambda.temp <- c(lambda, lambda) 
+        lambda_star = tau * lambda.temp
+        U = as.numeric(lambda_star^2) * t(X)
+        u = stats::rnorm(l2, l0, lambda_star)
+        v = X %*% u + stats::rnorm(n)
+        v_star = solve((X %*% U + I_n), (((y - alpha)/sqrt(sigma_sq)) - v))
+        beta = sqrt(sigma_sq) * (u + U %*% v_star)
+      } else {
+        lambda.temp <- c(lambda, lambda) 
+        lambda_star = tau * lambda.temp
+        L = chol((1/sigma_sq) * (Q_star + diag(1/as.numeric(lambda_star^2), p, p)))
+        v = solve(t(L), t(t(y - alpha) %*% X)/sigma_sq)
+        mu = solve(L, v)
+        u = solve(L, stats::rnorm(p))
+        beta = mu + u
+      }
+      
+      
+      
+      ## Sample lambda
+      eta <- 1/(lambda^2)
+      upsi <- stats::runif((p/2), 0, 1/(1 + eta))
+      tempps <- c((beta[1]^2 + beta[11]^2), (beta[2]^2 + beta[12]^2), (beta[3]^2 + beta[13]^2), 
+                  (beta[4]^2 + beta[14]^2), (beta[5]^2 + beta[15]^2), (beta[6]^2 + beta[16]^2),
+                  (beta[7]^2 + beta[17]^2), (beta[8]^2 + beta[18]^2), (beta[9]^2 + beta[19]^2),
+                  (beta[10]^2 + beta[20]^2))/(2 * sigma_sq * tau^2)
+      ub = (1 - upsi)/upsi
+      # Fub = stats::pgamma(ub,(p/2+1)/2,scale = 1/tempps)
+      Fub = 1 - exp(-tempps * ub)
+      Fub[Fub < (1e-04)] = 1e-04
+      up = stats::runif(p/2, 0, Fub)
+      # eta = stats::qgamma(up,(p/2+1)/2,scale = 1/tempps)
+      eta = -log(1 - up)/tempps
+      lambda = 1/sqrt(eta)
+      
+      
+      
+      ## sample tau
+      tempt <- sum((beta[1:(p/2)]/lambda)^2 + (beta[(p/2 + 1):p]/lambda)^2)/(2 * sigma_sq)
+      et = 1/tau^2
+      utau = stats::runif(1, 0, 1/(1 + et))
+      ubt = (1 - utau)/utau
+      Fubt = stats::pgamma(ubt, (p/2 + 1)/2, scale = 1/tempt)
+      Fubt = max(Fubt, 1e-08)
+      ut = stats::runif(1, 0, Fubt)
+      et = stats::qgamma(ut, (p/2 + 1)/2, scale = 1/tempt)
+      tau = 1/sqrt(et)
+      
+      
+      
+      ## Sample sigma square
+      E1 = max(t(y - alpha - X %*% beta) %*% (y - alpha - X %*% beta), (1e-10))
+      E2 = max(sum((beta[1:(p/2)]/lambda)^2 + (beta[(p/2 + 1):p]/lambda)^2)/(tau^2), (1e-10))
+      E3 <- crossprod(x = alpha)
+      sigma_sq = 1/stats::rgamma(1, (n + p/2 + 1)/2, scale = 2/(E1 + E2 + E3))
+      
+      
+    logt <- alpha + Xtest %*% beta
+    predictive.survivor <- pnorm(log(cttest[, 1]), mean = logt, sd = sd.impute, lower.tail = FALSE)
+    
+    
+    loglikelihood <- sum(c(dnorm(y.observed, mean = alpha + X.observed %*% beta, sd = sqrt(sigma_sq),
+                                   log = TRUE), 
+                             log(1 - pnorm(y.censored, mean = alpha + X.censored %*% beta,
+                                           sd = sqrt(sigma_sq)))))
+    likelihood    <- exp(loglikelihood)
+    
+    
+    if (i%%1000 == 0)
+    {
+      print(i)
+    }
+    
+    
+    if (i > nburnin && i%%thin == 0)
+    {
+      alphaout[(i - nburnin)/thin]          <- alpha
+      betaout[, (i - nburnin)/thin]         <- beta
+      lambdaout[, (i - nburnin)/thin]       <- lambda
+      sigmaSqout[(i - nburnin)/thin]        <- sigma_sq
+      predsurvout[ ,(i - nburnin)/thin]     <- predictive.survivor
+      logtimeout[, (i - nburnin)/thin]      <- logt
+      likelihood.out[, (i - nburnin)/thin]  <- likelihood
+      loglikelihood.out[(i - nburnin)/thin] <- loglikelihood
+    }
+  }
+  
+  
+  pMean.alpha    <- mean(alphaout)
+  pMean          <- apply(betaout, 1, mean)
+  pMedian        <- apply(betaout, 1, stats::median)
+  pLambda        <- apply(lambdaout, 1, mean)
+  pSigma         <- mean(sigmaSqout)
+  pPS            <- apply(predsurvout, 1, mean)
+  pLogtime       <- apply(logtimeout, 1, mean)
+  plikelihood    <- apply(likelihood.out, 1, mean)
+  pLoglikelihood <- mean(loglikelihood.out)
+   
+  loglikelihood.posterior <- sum(c(dnorm(y.observed, mean = pMean.alpha + X.observed %*% pMean, sd = sqrt(pSigma), log = TRUE),
+                                     log(1 - pnorm(y.censored, mean = pMean.alpha + X.censored %*% pMean,
+                                                   sd = sqrt(pSigma)))))
+  
+  DIC  <- -4 * pLoglikelihood + 2 * loglikelihood.posterior
+  lppd <- sum(log(plikelihood))
+  WAIC <- -2 * (lppd - 2 * (loglikelihood.posterior - pLoglikelihood))
+  
+  
+  result = list(BetaHat = pMean, BetaMedian = pMedian, Sigma2Hat = pSigma, AlphaHat = pMean.alpha,
+                BetaSamples = betaout, Sigma2Samples = sigmaSqout, SurvivalHat = pPS,
+                LogTimeHat = pLogtime, DIC = DIC, WAIC = WAIC, LambdaHat = pLambda)
+  return(result)
+}
+
+
